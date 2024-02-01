@@ -16,9 +16,17 @@
 // under the License.
 
 //! Logic for parsing and interacting with schemas in Avro format.
-use crate::{error::Error, types, util::MapHelper, AvroResult};
+use crate::{
+    error::Error,
+    types,
+    util::MapHelper,
+    validator::{
+        validate_enum_symbol_name, validate_namespace, validate_record_field_name,
+        validate_schema_name,
+    },
+    AvroResult,
+};
 use digest::Digest;
-use regex_lite::Regex;
 use serde::{
     ser::{SerializeMap, SerializeSeq},
     Deserialize, Serialize, Serializer,
@@ -33,36 +41,8 @@ use std::{
     hash::Hash,
     io::Read,
     str::FromStr,
-    sync::OnceLock,
 };
 use strum_macros::{EnumDiscriminants, EnumString};
-
-fn enum_symbol_name_r() -> &'static Regex {
-    static ENUM_SYMBOL_NAME_ONCE: OnceLock<Regex> = OnceLock::new();
-    ENUM_SYMBOL_NAME_ONCE.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap())
-}
-
-// An optional namespace (with optional dots) followed by a name without any dots in it.
-fn schema_name_r() -> &'static Regex {
-    static SCHEMA_NAME_ONCE: OnceLock<Regex> = OnceLock::new();
-    SCHEMA_NAME_ONCE.get_or_init(|| {
-        Regex::new(
-            r"^((?P<namespace>([A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*)?)\.)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)$",
-        ).unwrap()
-    })
-}
-
-fn field_name_r() -> &'static Regex {
-    static FIELD_NAME_ONCE: OnceLock<Regex> = OnceLock::new();
-    FIELD_NAME_ONCE.get_or_init(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*$").unwrap())
-}
-
-fn namespace_r() -> &'static Regex {
-    static NAMESPACE_ONCE: OnceLock<Regex> = OnceLock::new();
-    NAMESPACE_ONCE.get_or_init(|| {
-        Regex::new(r"^([A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*)?$").unwrap()
-    })
-}
 
 /// Represents an Avro schema fingerprint
 /// More information about Avro schema fingerprints can be found in the
@@ -162,13 +142,13 @@ pub enum Schema {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapSchema {
     pub types: Box<Schema>,
-    pub custom_attributes: BTreeMap<String, Value>,
+    pub attributes: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ArraySchema {
     pub items: Box<Schema>,
-    pub custom_attributes: BTreeMap<String, Value>,
+    pub attributes: BTreeMap<String, Value>,
 }
 
 impl PartialEq for Schema {
@@ -279,13 +259,7 @@ impl Name {
     }
 
     fn get_name_and_namespace(name: &str) -> AvroResult<(String, Namespace)> {
-        let caps = schema_name_r()
-            .captures(name)
-            .ok_or_else(|| Error::InvalidSchemaName(name.to_string(), schema_name_r().as_str()))?;
-        Ok((
-            caps["name"].to_string(),
-            caps.name("namespace").map(|s| s.as_str().to_string()),
-        ))
+        validate_schema_name(name)
     }
 
     /// Parse a `serde_json::Value` into a `Name`.
@@ -312,12 +286,7 @@ impl Name {
             .filter(|ns| !ns.is_empty());
 
         if let Some(ref ns) = namespace {
-            if !namespace_r().is_match(ns) {
-                return Err(Error::InvalidNamespace(
-                    ns.to_string(),
-                    namespace_r().as_str(),
-                ));
-            }
+            validate_namespace(ns)?;
         }
 
         Ok(Self {
@@ -686,9 +655,7 @@ impl RecordField {
     ) -> AvroResult<Self> {
         let name = field.name().ok_or(Error::GetNameFieldFromRecord)?;
 
-        if !field_name_r().is_match(&name) {
-            return Err(Error::FieldName(name));
-        }
+        validate_record_field_name(&name)?;
 
         // TODO: "type" = "<record name>"
         let schema = parser.parse_complex(field, &enclosing_record.namespace)?;
@@ -1134,7 +1101,9 @@ impl Schema {
         match self {
             Schema::Record(RecordSchema { attributes, .. })
             | Schema::Enum(EnumSchema { attributes, .. })
-            | Schema::Fixed(FixedSchema { attributes, .. }) => Some(attributes),
+            | Schema::Fixed(FixedSchema { attributes, .. })
+            | Schema::Array(ArraySchema { attributes, .. })
+            | Schema::Map(MapSchema { attributes, .. }) => Some(attributes),
             _ => None,
         }
     }
@@ -1179,15 +1148,15 @@ impl Schema {
     pub fn map(types: Schema) -> Self {
         Schema::Map(MapSchema {
             types: Box::new(types),
-            custom_attributes: Default::default(),
+            attributes: Default::default(),
         })
     }
 
     /// Returns a Schema::Map with the given types and custom attributes.
-    pub fn map_with_attributes(types: Schema, custom_attributes: BTreeMap<String, Value>) -> Self {
+    pub fn map_with_attributes(types: Schema, attributes: BTreeMap<String, Value>) -> Self {
         Schema::Map(MapSchema {
             types: Box::new(types),
-            custom_attributes,
+            attributes,
         })
     }
 
@@ -1195,18 +1164,15 @@ impl Schema {
     pub fn array(items: Schema) -> Self {
         Schema::Array(ArraySchema {
             items: Box::new(items),
-            custom_attributes: Default::default(),
+            attributes: Default::default(),
         })
     }
 
     /// Returns a Schema::Array with the given items and custom attributes.
-    pub fn array_with_attributes(
-        items: Schema,
-        custom_attributes: BTreeMap<String, Value>,
-    ) -> Self {
+    pub fn array_with_attributes(items: Schema, attributes: BTreeMap<String, Value>) -> Self {
         Schema::Array(ArraySchema {
             items: Box::new(items),
-            custom_attributes,
+            attributes,
         })
     }
 }
@@ -1713,10 +1679,7 @@ impl Parser {
 
         let mut existing_symbols: HashSet<&String> = HashSet::with_capacity(symbols.len());
         for symbol in symbols.iter() {
-            // Ensure enum symbol names match [A-Za-z_][A-Za-z0-9_]*
-            if !enum_symbol_name_r().is_match(symbol) {
-                return Err(Error::EnumSymbolName(symbol.to_string()));
-            }
+            validate_enum_symbol_name(symbol)?;
 
             // Ensure there are no duplicate symbols
             if existing_symbols.contains(&symbol) {
@@ -1772,7 +1735,12 @@ impl Parser {
             .get("items")
             .ok_or(Error::GetArrayItemsField)
             .and_then(|items| self.parse(items, enclosing_namespace))
-            .map(Schema::array)
+            .map(|items| {
+                Schema::array_with_attributes(
+                    items,
+                    self.get_custom_attributes(complex, vec!["items"]),
+                )
+            })
     }
 
     /// Parse a `serde_json::Value` representing a Avro map type into a
@@ -1786,7 +1754,12 @@ impl Parser {
             .get("values")
             .ok_or(Error::GetMapValuesField)
             .and_then(|items| self.parse(items, enclosing_namespace))
-            .map(Schema::map)
+            .map(|items| {
+                Schema::map_with_attributes(
+                    items,
+                    self.get_custom_attributes(complex, vec!["values"]),
+                )
+            })
     }
 
     /// Parse a `serde_json::Value` representing a Avro union type into a
@@ -1896,19 +1869,19 @@ impl Serialize for Schema {
             Schema::Bytes => serializer.serialize_str("bytes"),
             Schema::String => serializer.serialize_str("string"),
             Schema::Array(ref inner) => {
-                let mut map = serializer.serialize_map(Some(2 + inner.custom_attributes.len()))?;
+                let mut map = serializer.serialize_map(Some(2 + inner.attributes.len()))?;
                 map.serialize_entry("type", "array")?;
                 map.serialize_entry("items", &*inner.items.clone())?;
-                for attr in &inner.custom_attributes {
+                for attr in &inner.attributes {
                     map.serialize_entry(attr.0, attr.1)?;
                 }
                 map.end()
             }
             Schema::Map(ref inner) => {
-                let mut map = serializer.serialize_map(Some(2 + inner.custom_attributes.len()))?;
+                let mut map = serializer.serialize_map(Some(2 + inner.attributes.len()))?;
                 map.serialize_entry("type", "map")?;
                 map.serialize_entry("values", &*inner.types.clone())?;
-                for attr in &inner.custom_attributes {
+                for attr in &inner.attributes {
                     map.serialize_entry(attr.0, attr.1)?;
                 }
                 map.end()
@@ -6277,26 +6250,6 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_avro_3897_disallow_invalid_namespaces_in_fully_qualified_name() -> TestResult {
-        let full_name = "ns.0.record1";
-        let name = Name::new(full_name);
-        assert!(name.is_err());
-        let expected =
-            Error::InvalidSchemaName(full_name.to_string(), schema_name_r().as_str()).to_string();
-        let err = name.map_err(|e| e.to_string()).err().unwrap();
-        assert_eq!(expected, err);
-
-        let full_name = "ns..record1";
-        let name = Name::new(full_name);
-        assert!(name.is_err());
-        let expected =
-            Error::InvalidSchemaName(full_name.to_string(), schema_name_r().as_str()).to_string();
-        let err = name.map_err(|e| e.to_string()).err().unwrap();
-        assert_eq!(expected, err);
-        Ok(())
-    }
-
     /// A test cases showing that names and namespaces can be constructed
     /// entirely by underscores.
     #[test]
@@ -6589,7 +6542,12 @@ mod tests {
             r#"{"field-id":"1","items":"long","type":"array"}"#,
             &serialized
         );
-        assert_eq!(expected, Schema::parse_str(&serialized)?);
+        let actual_schema = Schema::parse_str(&serialized)?;
+        assert_eq!(expected, actual_schema);
+        assert_eq!(
+            expected.custom_attributes(),
+            actual_schema.custom_attributes()
+        );
 
         Ok(())
     }
@@ -6607,7 +6565,12 @@ mod tests {
             r#"{"field-id":"1","type":"map","values":"long"}"#,
             &serialized
         );
-        assert_eq!(expected, Schema::parse_str(&serialized)?);
+        let actual_schema = Schema::parse_str(&serialized)?;
+        assert_eq!(expected, actual_schema);
+        assert_eq!(
+            expected.custom_attributes(),
+            actual_schema.custom_attributes()
+        );
 
         Ok(())
     }
