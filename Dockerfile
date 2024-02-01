@@ -236,3 +236,6 @@ ENV PATH $PATH:/opt/dotnet
 #RUN update-java-alternatives  -s "java-1.8.0*"
 
 CMD ["/bin/bash", "-i"]
+ENV HOME /home/chad
+RUN getent group 1000 || groupadd -g 1000 chad
+RUN getent passwd 1000 || useradd -g 1000 -u 1000 -k /root -m chad

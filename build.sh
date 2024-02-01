@@ -325,7 +325,7 @@ do
       # extra second before the changes are available within the docker container.
       # shellcheck disable=SC2086
       docker run --rm -t -i \
-        --env "JAVA=${JAVA:-8}" \
+        --env "JAVA=${JAVA:-11}" \
         --user "${USER_NAME}" \
         --volume "${HOME}/.gnupg:/home/${USER_NAME}/.gnupg" \
         --volume "${HOME}/.m2:/home/${USER_NAME}/.m2${DOCKER_MOUNT_FLAG}" \
@@ -348,7 +348,7 @@ do
     docker-test)
       tar -cf- share/docker/Dockerfile $DOCKER_EXTRA_CONTEXT |
         DOCKER_BUILDKIT=1 docker build -t avro-test -f share/docker/Dockerfile -
-      docker run --rm -v "${PWD}:/avro${DOCKER_MOUNT_FLAG}" --env "JAVA=${JAVA:-8}" avro-test /avro/share/docker/run-tests.sh
+      docker run --rm -v "${PWD}:/avro${DOCKER_MOUNT_FLAG}" --env "JAVA=${JAVA:-11}" avro-test /avro/share/docker/run-tests.sh
       ;;
 
     *)
