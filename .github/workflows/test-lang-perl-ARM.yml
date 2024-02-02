@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: 'Test Perl'
+name: 'Test Perl on ARM'
 on:
   workflow_dispatch:
   push:
@@ -123,11 +123,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-maven-
 
-      - name: 'Setup Temurin JDK 11, 17 & 21'
+      - name: 'Setup Temurin JDK 8, 11, 17 & 21'
         uses: actions/setup-java@387ac29b308b003ca37ba93a6cab5eb57c8f5f93 # v4.0.0
         with:
           distribution: 'temurin'
           java-version: |
+            8
             11
             17
             21
