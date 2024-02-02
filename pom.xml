@@ -241,7 +241,7 @@
                     <ignoredScope>provided</ignoredScope>
                   </ignoredScopes>
                   <!--
-                    Multi release jars that are Java 8 compatible should pass,
+                    Multi release jars that are Java 11 compatible should pass,
                     but the extra-enforcer-plugin does not detect them
                     correctly so we should ignore them explicitly.
                     -->
